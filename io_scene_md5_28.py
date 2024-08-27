@@ -262,8 +262,8 @@ def do_mesh(md5mesh, s_re, v_re, t_re, w_re, e_re, n_re, ms):
     vs, ts, ws = gather_multi([v_re, t_re, w_re], e_re, md5mesh)
     wd = bm.verts.layers.deform.verify()
     uvs = bm.loops.layers.uv.verify()
-    for _, vs in enumerate(vs):
-        wt, nwt = map(int, vs[3:])
+    for _, vi in enumerate(vs):
+        wt, nwt = map(int, vi[3:])
         w0 = ws[wt]
         mtx = ms[int(w0[1])][1]
         xyz = mtx @ Vector(map(float, w0[3:]))
@@ -276,7 +276,7 @@ def do_mesh(md5mesh, s_re, v_re, t_re, w_re, e_re, n_re, ms):
     if check_version(2, 80, 0) >= 0:
         bm.verts.ensure_lookup_table()
     for t in ts:
-        bm.verts.ensure_lookup_table()
+        # bm.verts.ensure_lookup_table()
         tvs = [bm.verts[a] for a in map(int, t[1:])]
         tvy = tvs
         try:
@@ -1709,7 +1709,7 @@ class ExportMD5Batch(Operator, ExportHelper):
     '''Save MD5 Files'''
     bl_idname = "export_scene.md5batch"
     bl_label = 'Export MD5 Files'
-    bl_options = {'PRESET'}
+    # bl_options = {'PRESET'}
     filename_ext = ".md5mesh"
     path_mode = path_reference_mode
     check_extension = True
