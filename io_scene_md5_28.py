@@ -14,6 +14,13 @@ update by hypov8
 -added file close and try block
 -removed dupe variables for old/new blender
 
+2024-08-29
+-fixed dialog box not saving previous settings
+-changed weight string to 4 decimal places
+-added export buttons to ui panel
+-added export selected only in ui panel
+-added selection check on export
+
 todo
 ====
 replace numpy for floats
@@ -24,8 +31,8 @@ replace numpy for floats
 
 bl_info = {
     "name": "id tech 4 MD5 format",
-    "author": "nemyax, 2.8 Update: Samson",
-    "version": (1, 11, 20240826),
+    "author": "nemyax, 2.8 Update: Samson, hypov8",
+    "version": (1, 11, 20240829),
     "blender": (2, 80, 0),
     "location": "File > Import-Export",
     "description": "Import and export md5mesh and md5anim",
@@ -103,6 +110,13 @@ class MD5_GlobalProps(PropertyGroup, Armature):
         name="errorMsg",
         default="",
     )
+    export_sel_mesh = BoolProperty(
+        name="Export Selected Mesh Only",
+        description=(
+            "Only exported selected mesh.\n" +
+            "Disabled: exports all mesh inside active collection."),
+        default=False
+    )
 
     def addCollection(self, context):
         ''' add objects and armature pointers '''
@@ -112,7 +126,6 @@ class MD5_GlobalProps(PropertyGroup, Armature):
             self.bone_list.append(b)
         for o in context[2]:
             self.mesh_list.append(o)
-        print("add")
 
     def clear(self):
         ''' clear data '''
@@ -121,16 +134,13 @@ class MD5_GlobalProps(PropertyGroup, Armature):
         self.mesh_list.clear()
         self.pre_tests = False
         self.errorMsg = ""
-        print("clear")
 
     def getCollection(self):
         ''' return (bone,mesh) '''
-        print("get")
         return (self.armature_list, self.bone_list, self.mesh_list)
 
     def getBoneMesh(self):
         ''' return (bone,mesh) '''
-        print("get")
         return (self.bone_list, self.mesh_list)
 
     def getBones(self):
@@ -781,7 +791,7 @@ def make_mesh_block(obj, bones, correctionMatrix, fixWindings):
         "\tweight {} {} {} ( {} {} {} )\n".format(
             w[0],            # weightIndex
             w[1],            # jointIndex
-            prnt_f(w[2], 2), # weightValue
+            prnt_f(w[2], 4), # weightValue
             prnt_f(w[3]),    # xPos
             prnt_f(w[4]),    # yPos
             prnt_f(w[5])))   # zPos
@@ -984,6 +994,13 @@ def md5_error_messages(context, eid, *details):
 
     bl = str(context.window_manager.md5_prop.boneLayer_idx)
 
+    if eid == 'no_selection':
+        return ("Nothing selected to export.\n" +
+                "Please select an object in the collection" +
+                " you would like to export, and try again.")
+    if eid == 'no_selectedmesh':
+        return ("No valid mesh selected.\n" +
+                "Select the mesh object you want to export, and retry export.")
     if eid == 'no_deformables':
         return ("No armature-deformed meshes found.\n" +
                 "Select the collection or object you want to export, and retry export.")
@@ -1021,11 +1038,11 @@ def md5_error_messages(context, eid, *details):
                 "Paint non-zero weights on all the vertices in the mesh, and retry export.")
     if eid == 'zero_weight_verts':
         return ("The '" + details[0][0] + "' object contains" + str(details[0][1]) +
-                "vertices with zero(<0.01) weights assigned.\n" +
+                "vertices with zero(<0.0001) weights assigned.\n" +
                 "This can cause adverse effects.\n" +
                 "Paint non-zero weights on all the vertices in the mesh,\n" +
                 "or use the Clean operation in the weight paint tools.\n" +
-                "( if using Clean, anything with a weight less 0.01 \n" +
+                "( if using Clean, anything with a weight less 0.0001 \n" +
                 "is considered a zero weight, so use this limit in the clean tool)\n" +
                 "Please correct zero weights and retry export.")
     if eid == 'no_uvs':
@@ -1059,9 +1076,9 @@ def check_weighting(obj, bm, bones):
             unweightedVerts += 1
         else:
             for wgi in influences:
-                if v[weightData][wgi] < 0.01: # changed lower
+                if v[weightData][wgi] < 0.0001: # changed lower
                     zeroWeightVerts += 1
-                    print("Zero Weight %s ( checking against limit of 0.01 )", v[weightData][wgi])
+                    print("Zero Weight %s ( checking against limit of 0.0001 )", v[weightData][wgi])
                     v.select_set(True)
     return (unweightedVerts, zeroWeightVerts)
 
@@ -1072,15 +1089,17 @@ def is_export_go(context, what, collection):
     #support single mesh export.
     #only supported by commandline, normal export is still as documented.
     if what == 'mesh':
+        if context.active_object.type != 'MESH':
+            return ['no_selectedmesh', None]
         meshObjects = [context.active_object]
-    else:
+    else: # 'meshes' 'anim' 'batch'
         meshObjects = [
             o for o in bpy.data.collections[collection.name].objects
             if o.data in bpy.data.meshes[:] and o.find_armature()]
 
-    armatures = [a.find_armature() for a in meshObjects]
     if not meshObjects:
         return ['no_deformables', None]
+    armatures = [a.find_armature() for a in meshObjects]
     armature = armatures[0]
     if armatures.count(armature) < len(meshObjects):
         return ['multiple_armatures', None]
@@ -1123,23 +1142,14 @@ def export_validation(context, what): #, collection):
 
     ao = context.active_object
 
-    if not ao:
-        msgLines = (
-            "Nothing selected to export.\n" +
-            "Please select an object in the collection" +
-            " you would like to export, and try again.")
+    if not ao or len(context.selected_objects) == 0:
+        msgLines = md5_error_messages(context, 'no_selection', None)
         bpy.ops.message.md5_messagebox('INVOKE_DEFAULT', message=msgLines)
-        # print(msgLines)
-        # self.report({'ERROR'}, msgLines)
-        md5_prop.errorMsg = "Nothing selected." #msgLines
+        md5_prop.errorMsg = "Nothing selected."
         return False # {'CANCELLED'}
 
     collection = ao.users_collection[0]
     md5_prop.collection_prefix = "("+collection.name+")_"
-
-    #skip. is valid
-    if md5_prop.pre_tests:
-        return True
 
     checkResult = is_export_go(context, what, collection)
     if checkResult[0] == 'ok':
@@ -1216,7 +1226,7 @@ def remove_prefix(text, prefix):
 
 class ImportMD5Mesh(Operator, ImportHelper):
     '''Import an .MD5mesh file as a new Collection'''
-    bl_idname = "import_scene.md5mesh"
+    bl_idname = "import_scene.import_md5mesh"
     bl_label = 'Import MD5MESH'
     bl_options = {'PRESET'}
     filename_ext = ".md5mesh"
@@ -1280,57 +1290,15 @@ class ImportMD5Mesh(Operator, ImportHelper):
         return {'FINISHED'}
 
 
-class MaybeImportMD5Anim(Operator):
+class ImportMD5Anim(Operator, ImportHelper):
     '''
     Import one or more .MD5anim files into dopesheet actions associated
     with the collection of the active object.
     '''
-    bl_idname = "export_scene.maybe_import_md5anim"
-    bl_label = 'Import MD5ANIM'
-    def invoke(self, context, event):
-
-        #check the active object first
-        ao = context.active_object
-        if ao and ao.type == 'ARMATURE' and ao.data.bones[:]:
-            return bpy.ops.import_scene.md5anim('INVOKE_DEFAULT')
-
-        #if the active object isn't a valid armature, get it's collection and check
-
-        if ao:
-            collection = ao.users_collection[0]
-            print("Using armature")
-        else:
-            collection = context.view_layer.active_layer_collection
-
-        print(collection)
-        if collection.has_objects():
-            meshObjects = [
-                o for o in bpy.data.collections[collection.name].objects
-                if o.data in bpy.data.meshes[:] and o.find_armature()]
-
-            armatures = [a.find_armature() for a in meshObjects]
-            if meshObjects:
-                armature = armatures[0]
-                if armature.data.bones[:]:
-                    context.view_layer.objects.active = armature
-                    return bpy.ops.import_scene.md5anim('INVOKE_DEFAULT')
-
-        # no valid armature selected or in the active collection
-        msg = md5_error_messages(context, "no_arm")
-        bpy.ops.message.md5_messagebox('INVOKE_DEFAULT', message=msg)
-        # print(msg)
-        # self.report({'ERROR'}, msg)
-        return {'CANCELLED'}
-
-
-class ImportMD5Anim(Operator, ImportHelper):
-    '''Load an MD5 Animation File'''
-
-    bl_idname = "import_scene.md5anim"
+    bl_idname = "import_scene.import_md5anim"
     bl_label = 'Import MD5ANIM'
     bl_options = {'PRESET'}
     filename_ext = ".md5anim"
-
     path_mode = path_reference_mode
     check_extension = True
 
@@ -1399,9 +1367,45 @@ class ImportMD5Anim(Operator, ImportHelper):
         for s in self.__class__.md5_export_helpText:
             row.label(text=s)
 
-    def execute(self, context):
+    def invoke(self, context, event):
 
-        import os
+        #check the active object first
+        ao = context.active_object
+        if ao and ao.type == 'ARMATURE' and ao.data.bones[:]:
+            context.window_manager.fileselect_add(self)
+            return {'RUNNING_MODAL'}
+
+        #if the active object isn't a valid armature, get it's collection and check
+
+        if ao:
+            collection = ao.users_collection[0]
+            print("Using armature")
+        else:
+            collection = context.view_layer.active_layer_collection
+
+        print(collection)
+        if collection.has_objects():
+            meshObjects = [
+                o for o in bpy.data.collections[collection.name].objects
+                if o.data in bpy.data.meshes[:] and o.find_armature()]
+
+            armatures = [a.find_armature() for a in meshObjects]
+            if meshObjects:
+                armature = armatures[0]
+                if armature.data.bones[:]:
+                    context.view_layer.objects.active = armature
+                    context.window_manager.fileselect_add(self)
+                    return {'RUNNING_MODAL'}
+
+        # no valid armature selected or in the active collection
+        msg = md5_error_messages(context, "no_arm")
+        bpy.ops.message.md5_messagebox('INVOKE_DEFAULT', message=msg)
+        # print(msg)
+        # self.report({'ERROR'}, msg)
+        return {'CANCELLED'}
+
+
+    def execute(self, context):
         errors = 0
         successes = 0
         errorString = ""
@@ -1510,60 +1514,23 @@ class MD5Panel(bpy.types.Panel):
         else:
             column1.enabled = False
 
+        #export buttons
+        layout.prop(md5_props, "export_sel_mesh")
+        col3 = layout.column()
+        col3.operator_context = 'INVOKE_DEFAULT'
+        col3.scale_y = 1.4
+        col3.operator("export_scene.export_md5mesh", icon='OUTLINER_OB_MESH')
+        col3.operator("export_scene.export_md5anim", icon='OUTLINER_OB_ARMATURE')
+        col3.operator("export_scene.export_md5batch", icon='PACKAGE')
+
 ### Export UI
 
-class MaybeExportMD5Mesh(Operator):
-    '''Export All objects in the parent collection of the active object as an .MD5mesh.'''
-    bl_idname = "export_scene.maybe_export_md5mesh"
-    bl_label = 'Export MD5MESH'
-
-    def invoke(self, context, event):
-        md5_prop = context.window_manager.md5_prop
-        md5_prop.clear()
-
-        if not export_validation(context, 'meshes'):
-            self.report({'ERROR'}, md5_prop.errorMsg)
-            return {'CANCELLED'}
-
-        return bpy.ops.export_scene.md5mesh('INVOKE_DEFAULT')
-
-class MaybeExportMD5Anim(Operator):
-    '''Export the action currently associated with the active object as an .MD5anim'''
-    bl_idname = "export_scene.maybe_export_md5anim"
-    bl_label = 'Export MD5ANIM'
-    def invoke(self, context, event):
-        md5_prop = context.window_manager.md5_prop
-        md5_prop.clear()
-
-        if not export_validation(context, 'anim'):
-            self.report({'ERROR'}, md5_prop.errorMsg)
-            return {'CANCELLED'}
-
-        return bpy.ops.export_scene.md5anim('INVOKE_DEFAULT')
-
-class MaybeExportMD5Batch(Operator):
-    '''Export all objects in the parent collection of the active object as an .MD5mesh.
-    Export the active action or all actions as .MD5anim files'''
-    bl_idname = "export_scene.maybe_export_md5batch"
-    bl_label = 'Export MD5 Files'
-
-    def invoke(self, context, event):
-        md5_prop = context.window_manager.md5_prop
-        md5_prop.clear()
-
-        if not export_validation(context, 'batch'):
-            self.report({'ERROR'}, md5_prop.errorMsg)
-            return {'CANCELLED'}
-
-        return bpy.ops.export_scene.md5batch('INVOKE_DEFAULT')
-
 class ExportMD5Mesh(Operator, ExportHelper):
-    '''Save an MD5 Mesh File'''
-    bl_idname = "export_scene.md5mesh"
-    bl_label = 'Export MD5MESH'
-    bl_options = {'PRESET'}
+    '''Export All objects in the parent collection of the active object as an .MD5mesh.'''
+    bl_idname = "export_scene.export_md5mesh"
+    bl_label = 'Export MD5 Mesh'
+    # bl_options = {'PRESET'}
     filename_ext = ".md5mesh"
-
     path_mode = path_reference_mode
     check_extension = True
 
@@ -1599,6 +1566,18 @@ class ExportMD5Mesh(Operator, ExportHelper):
     )
 
     def invoke(self, context, event):
+        md5_prop = context.window_manager.md5_prop
+        md5_prop.clear()
+
+        if md5_prop.export_sel_mesh:
+            exp_type = 'mesh'
+        else:
+            exp_type = 'meshes'
+
+        if not export_validation(context, exp_type): # 'mesh'
+            self.report({'ERROR'}, md5_prop.errorMsg)
+            return {'CANCELLED'}
+
         ao = context.active_object
         collection = ao.users_collection[0]
         self.filepath = collection.name
@@ -1608,10 +1587,6 @@ class ExportMD5Mesh(Operator, ExportHelper):
     def execute(self, context):
         md5_prop = context.window_manager.md5_prop
 
-        if not export_validation(context, 'mesh'):
-            self.report({'ERROR'}, md5_prop.errorMsg)
-            return {'CANCELLED'}
-
         orientationTweak = Matrix.Rotation(math.radians(float(self.reorientDegrees)), 4, 'Z')
         scaleTweak = Matrix.Scale(self.scaleFactor, 4)
         correctionMatrix = orientationTweak @ scaleTweak
@@ -1620,13 +1595,12 @@ class ExportMD5Mesh(Operator, ExportHelper):
             correctionMatrix, self.fixWindings)
         return {'FINISHED'}
 
-class ExportMD5Anim(Operator, ExportHelper):
-    '''Save an MD5 Animation File'''
-    bl_idname = "export_scene.md5anim"
-    bl_label = 'Export MD5ANIM'
-    bl_options = {'PRESET'}
-    filename_ext = ".md5anim"
 
+class ExportMD5Anim(Operator, ExportHelper):
+    '''Export the action currently associated with the active object as an .MD5anim'''
+    bl_idname = "export_scene.export_md5anim"
+    bl_label = 'Export MD5 Animations'
+    filename_ext = ".md5anim"
     path_mode = path_reference_mode
     check_extension = True
 
@@ -1670,13 +1644,14 @@ class ExportMD5Anim(Operator, ExportHelper):
 
     def invoke(self, context, event):
         md5_prop = context.window_manager.md5_prop
+        md5_prop.clear()
 
         if not export_validation(context, 'anim'):
             self.report({'ERROR'}, md5_prop.errorMsg)
             return {'CANCELLED'}
 
+        # get filepath
         armatures = md5_prop.getArmature()
-
         self.filepath = remove_prefix(
             armatures[0].animation_data.action.name,
             md5_prop.collection_prefix)
@@ -1685,11 +1660,6 @@ class ExportMD5Anim(Operator, ExportHelper):
 
     def execute(self, context):
         md5_prop = context.window_manager.md5_prop
-
-        if not export_validation(context, 'anim'):
-            self.report({'ERROR'}, md5_prop.errorMsg)
-            return {'CANCELLED'}
-
         armatures, bones, meshObjects = md5_prop.getCollection()
 
         orientationTweak = Matrix.Rotation(math.radians(float(self.reorientDegrees)), 4, 'Z')
@@ -1705,16 +1675,18 @@ class ExportMD5Anim(Operator, ExportHelper):
             self.baseframeAnim)
         return {'FINISHED'}
 
+
 class ExportMD5Batch(Operator, ExportHelper):
-    '''Save MD5 Files'''
-    bl_idname = "export_scene.md5batch"
-    bl_label = 'Export MD5 Files'
+    '''Export all objects in the parent collection of the active object as an .MD5mesh.
+    Export the active action or all actions as .MD5anim files'''
+    bl_idname = "export_scene.export_md5batch"
+    bl_label = 'Export MD5 Mesh+Anim'
     # bl_options = {'PRESET'}
+
     filename_ext = ".md5mesh"
     path_mode = path_reference_mode
     check_extension = True
 
-    # use make_annotations()
     filter_glob = StringProperty(
         default="*.md5mesh",
         options={'HIDDEN'},
@@ -1777,10 +1749,19 @@ class ExportMD5Batch(Operator, ExportHelper):
         default=True,
     )
 
-    path_mode = path_reference_mode
-    check_extension = True
-
     def invoke(self, context, event):
+        md5_prop = context.window_manager.md5_prop
+        md5_prop.clear()
+
+        if md5_prop.export_sel_mesh:
+            exp_type = 'mesh'
+        else:
+            exp_type = 'batch'
+
+        if not export_validation(context, exp_type):
+            self.report({'ERROR'}, md5_prop.errorMsg)
+            return {'CANCELLED'}
+
         ao = context.active_object
         collection = ao.users_collection[0]
         self.filepath = collection.name
@@ -1794,16 +1775,9 @@ class ExportMD5Batch(Operator, ExportHelper):
         orientationTweak = Matrix.Rotation(math.radians(float(self.reorientDegrees)), 4, 'Z')
         scaleTweak = Matrix.Scale(self.scaleFactor, 4)
         correctionMatrix = orientationTweak @ scaleTweak
-
         batch_directory = os.path.dirname(self.filepath)
-        #ewfile_name = os.path.join( directory , "newfile.blend")
-
-        # ao = context.active_object
-        # collection = ao.users_collection[0]
         collection_Prefix = md5_prop.collection_prefix  #"("+collection.name+")_"
-
         armature = armatures[0]
-
         #write the mesh
         write_md5mesh(self.filepath, (bones, meshObjects), correctionMatrix, self.fixWindings)
 
@@ -1847,9 +1821,10 @@ class ExportMD5Batch(Operator, ExportHelper):
 
         return {'FINISHED'}
 
+
 class MD5_MessageBox(Operator):
     bl_idname = "message.md5_messagebox"
-    bl_label = ""
+    bl_label = "INFO:"
 
     message = bpy.props.StringProperty(
         name="message",
@@ -1890,30 +1865,26 @@ def menu_func_import_mesh(self, context):
         ImportMD5Mesh.bl_idname, text="MD5 Mesh (.md5mesh)")
 def menu_func_import_anim(self, context):
     self.layout.operator(
-        MaybeImportMD5Anim.bl_idname, text="MD5 Animation(s) (.md5anim)")
+        ImportMD5Anim.bl_idname, text="MD5 Animation(s) (.md5anim)")
 
 def menu_func_export_mesh(self, context):
     self.layout.operator(
-        MaybeExportMD5Mesh.bl_idname, text="MD5 Mesh (.md5mesh)")
+        ExportMD5Mesh.bl_idname, text="MD5 Mesh (.md5mesh)")
 def menu_func_export_anim(self, context):
     self.layout.operator(
-        MaybeExportMD5Anim.bl_idname, text="MD5 Animation (.md5anim)")
+        ExportMD5Anim.bl_idname, text="MD5 Animation (.md5anim)")
 def menu_func_export_batch(self, context):
     self.layout.operator(
-        MaybeExportMD5Batch.bl_idname, text="MD5 Mesh and Animation(s)")
+        ExportMD5Batch.bl_idname, text="MD5 Mesh and Animation(s)")
 
 classes = (
     ImportMD5Mesh,
-    MaybeImportMD5Anim,
     ImportMD5Anim,
     MD5BonesAdd,
     MD5BonesRemove,
     MD5BonesReplace,
     MD5BonesClear,
     MD5Panel,
-    MaybeExportMD5Mesh,
-    MaybeExportMD5Anim,
-    MaybeExportMD5Batch,
     ExportMD5Mesh,
     ExportMD5Anim,
     ExportMD5Batch,
