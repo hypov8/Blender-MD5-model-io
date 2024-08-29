@@ -20,6 +20,10 @@ update by hypov8
 -added export buttons to ui panel
 -added export selected only in ui panel
 -added selection check on export
+-error message dialog now splits on words
+-cleanup error messages
+-export all frames enabled as default (export mesh+anim)
+
 
 todo
 ====
@@ -1009,54 +1013,54 @@ def md5_error_messages(context, eid, *details):
                 "Select an object in a collection that cantains and uses only one armature, and try again.")
     if eid == 'no_armature':
         return ("No deforming armature is associated with the selected object or it's collection.\n" +
-                "Select the collection, or an object in the collection you want to export, and try again")
+                "Select the collection, or an object in the collection you want to export, and try again.")
     if eid == 'layer_empty':
         return ("The deforming armature in the collection has no bones in layer " + bl + ".\n" +
-                "Add all of the bones you want to export to the armature's layer " + bl + ",\n" +
-                "or change the reserved bone layer in the scene properties, and retry export.\n" +
-                "Bone layers can be managed in the 'Object Data Properties' section of the\n" +
-                "properties toolbar of the armature.")
+                "Add all of the bones you want to export to the armature's layer " + bl + "," +
+                " or change the reserved bone layer in the scene properties, and retry export.\n" +
+                "Bone layers can be managed in the 'Object Data Properties' section of the" +
+                " properties toolbar of the armature.")
     if eid == 'missing_parents':
         return ("One or more bones in the armature have parents outside layer " + bl + ".\n" +
-                "Revise your armature's layer " + bl + " membership,\n" +
-                "or change the reserved bone layer, and retry export.\n" +
-                "(Bone layers can be managed in the 'Object Data Properties' section of the\n" +
-                "properties toolbar of the armature.)\n" +
-                "Offending bones:" + concat_strings(details[0]))
+                "Revise your armature's layer " + bl + " membership," +
+                " or change the reserved bone layer, and retry export.\n" +
+                "Note: Bone layers can be managed in the 'Object Data Properties' section of the" +
+                " properties toolbar of the armature.\n" +
+                "Offending bones: " + concat_strings(details[0]))
     if eid == 'orphans':
-        return ("There are multiple root bones (listed below) " +
-                "in the export-bound collection, but only one root bone\n" +
-                "is allowed in MD5. Revise your armature's layer " + bl + " membership,\n" +
-                "or change the reserved bone layer and retry export.\n" +
-                "(Bone layers can be managed in the 'Object Data Properties' section of the\n" +
-                "properties toolbar of the armature.)\n" +
-                "Root bones:" + concat_strings(details[0]))
+        return ("There are multiple root bones (listed below)" +
+                " in the export-bound collection, but only one root bone is allowed in MD5.\n" +
+                "Revise your armature's layer " + bl + " membership," +
+                " or change the reserved bone layer and retry export.\n" +
+                "Note: Bone layers can be managed in the 'Object Data Properties' section of the" +
+                " properties toolbar of the armature.\n" +
+                "Root bones: " + concat_strings(details[0]))
     if eid == 'unweighted_verts':
-        return ("The '" + details[0][0] + "' object contains" + str(details[0][1]) +
-                "vertices with no deformation weights assigned.\n" +
+        return ("The '" + details[0][0] + "' object contains " + str(details[0][1]) +
+                " vertices with no deformation weights assigned.\n" +
                 "Valid MD5 data cannot be produced.\n" +
                 "Paint non-zero weights on all the vertices in the mesh, and retry export.")
     if eid == 'zero_weight_verts':
-        return ("The '" + details[0][0] + "' object contains" + str(details[0][1]) +
-                "vertices with zero(<0.0001) weights assigned.\n" +
+        return ("The '" + details[0][0] + "' object contains " + str(details[0][1]) +
+                " vertices with zero(<0.0001) weights assigned.\n" +
                 "This can cause adverse effects.\n" +
-                "Paint non-zero weights on all the vertices in the mesh,\n" +
-                "or use the Clean operation in the weight paint tools.\n" +
-                "( if using Clean, anything with a weight less 0.0001 \n" +
-                "is considered a zero weight, so use this limit in the clean tool)\n" +
+                "Paint non-zero weights on all the vertices in the mesh, " +
+                " or use the Clean operation in the weight paint tools.\n" +
+                "Note: if using Clean, anything with a weight less 0.0001" +
+                " is considered a zero weight, so use this limit in the clean tool.\n" +
                 "Please correct zero weights and retry export.")
     if eid == 'no_uvs':
         return ("The '" + details[0] + "' object has no UV coordinates.\n" +
-                "Valid MD5 data cannot be produced. Unwrap the object\n" +
-                "or exclude it from your selection, and retry export.")
+                "Valid MD5 data cannot be produced.\n" +
+                "Unwrap the object or exclude it from your selection, and retry export.")
     if eid == 'no_arm':
         return ("No armature found to add animation to.\n" +
-                "The active object is not an Armature, or the collection the active\n" +
-                "object belongs to does not contain a valid armature.\n" +
+                "The active object is not an Armature, or the collection the active" +
+                " object belongs to does not contain a valid armature.\n" +
                 "Select a valid armature or object in the desired collection, and retry import.")
     if eid == 'no_arm_match':
-        return ("The selected armature does not match the skeleton\n" +
-                "in the file you are trying to import.")
+        return ("The selected armature does not match the skeleton" +
+                " in the file you are trying to import.")
 
     return "Unhandled error"
 
@@ -1697,7 +1701,7 @@ class ExportMD5Batch(Operator, ExportHelper):
             "Export all actions associated with the object/collection as MD5 anims.\n" +
             " All keyframes for each action will be exported.\n" +
             " ( This exports all actions in the action editor that are prepended with the object/collection name. )"),
-        default=False,
+        default=True,
     )
     onlyPrepend = BoolProperty(
         name="Prepended action names only",
@@ -1847,8 +1851,16 @@ class MD5_MessageBox(Operator):
         return context.window_manager.invoke_props_dialog(self, width=600)
 
     def chunkstring(self, string, length):
-        # TODO trunc after space
-        return (string[0+i:length+i] for i in range(0, len(string), length))
+        outList = [""]
+        words = string.split(' ')
+        i = 0
+        for word in words:
+            if (len(outList[i]) + len(word)) < length:
+                outList[i] = outList[i] + word +" "
+            else:
+                outList.append(word + " ")
+                i += 1
+        return outList
 
     def draw(self, context):
         layout = self.layout
