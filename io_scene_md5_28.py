@@ -24,6 +24,9 @@ update by hypov8
 -cleanup error messages
 -export all frames enabled as default (export mesh+anim)
 
+2024-09-01
+-sort objects by name. this is so skin files are consistent
+
 
 todo
 ====
@@ -1100,6 +1103,7 @@ def is_export_go(context, what, collection):
         meshObjects = [
             o for o in bpy.data.collections[collection.name].objects
             if o.data in bpy.data.meshes[:] and o.find_armature()]
+        meshObjects.sort(key=lambda o: o.name) #sort by name. for skin files
 
     if not meshObjects:
         return ['no_deformables', None]
