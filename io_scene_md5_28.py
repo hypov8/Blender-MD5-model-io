@@ -26,11 +26,17 @@ update by hypov8
 
 2024-09-01
 -sort objects by name. this is so skin files are consistent
-
+-removed md5 bone layer system in favor of the checkbox 'Deform' on bones
+-moved tool panel to 3D UI
+-added tool panel option to export only 'Deform' bones
+-cleaned up adding new action, so failure can delete correct action name
+-export all anims option removed from batch export. all is now default.
+-cleaned up properties for dialog boxes, duplicated moved to a common class.
 
 todo
 ====
 replace numpy for floats
+import anims if matching struct fails.
 
 '''
 # pylint: disable=locally-disabled, line-too-long, wrong-import-position, invalid-name, too-many-lines, missing-function-docstring
@@ -87,6 +93,7 @@ from bpy.types import (
     PropertyGroup,
     WindowManager,
     Armature,
+    Panel,
     TOPBAR_MT_file_import,
     TOPBAR_MT_file_export
 )
@@ -117,12 +124,21 @@ class MD5_GlobalProps(PropertyGroup, Armature):
         name="errorMsg",
         default="",
     )
-    export_sel_mesh = BoolProperty(
-        name="Export Selected Mesh Only",
+    export_onlySelectedMesh = BoolProperty(
+        name="Only 'Selected' Mesh",
         description=(
             "Only exported selected mesh.\n" +
             "Disabled: exports all mesh inside active collection."),
         default=False
+    )
+    export_onlyDeformBones = BoolProperty(
+        name="Only 'Deform' Bones",
+        description=(
+            "Export only bones marked as deform.\n"+
+            "Disabled: export's all bones.\n" +
+            "Note: 'Deform' checkbox found in 'Bone Properties->Deform'."
+        ),
+        default=True
     )
 
     def addCollection(self, context):
@@ -157,6 +173,54 @@ class MD5_GlobalProps(PropertyGroup, Armature):
     def getArmature(self):
         ''' return armature '''
         return self.armature_list
+
+
+class MD5_Common_Prop:
+    ''' common export options '''
+    path_mode = path_reference_mode
+    check_extension = True
+    reorientDegrees = EnumProperty(
+        items=(
+            ('0', '0 Degrees', 'Do not reorient'),
+            ('90', '90 Degrees ( X to Y )', 'Rotate 90 degrees (e.g. reorient facing +X to facing +Y)'),
+            ('-90', '-90 Degrees ( Y to X )', 'Rotate -90 degrees (e.g. reorient facing +Y to facing +X'),
+            ('180', '180 Degrees', 'Rotate 180 degrees')),
+        name="Reorient Model",
+        description=(
+            "Degrees to rotate model during export." +
+            " Useful to reorient models to face Y axis if desired.\n" +
+            " 90 Degrees rotates clockwise from above.\n" +
+            " -90 Rotates counter-clockwise from above."),
+        default='0'
+    )
+    scaleFactor = FloatProperty(
+        name="Scale",
+        description="Scale all data",
+        min=0.01, max=1000.0,
+        soft_min=0.01,
+        soft_max=1000.0,
+        default=1.0,
+    )
+
+
+class MD5_CommonMesh_Prop:
+    ''' common to mesh '''
+    fixWindings = BoolProperty(
+        name="Fix Eye Deform",
+        description="Only select if having issues with materials flagged with eyeDeform",
+        default=False
+    )
+
+
+class MD5_CommonAnim_Prop:
+    ''' common to anims '''
+    baseframeTPose = BoolProperty(
+        name="T-Pose Baseframe",
+        description=(
+            "Exports the models T-Pose as the baseframe.\n"+
+            "Disabled: Use the values from the first frame of animation to generate the baseframe."),
+        default=False,
+    )
 
 
 def check_version(major, minor, _):
@@ -210,7 +274,7 @@ def make_annotations(cls):
 
 ### .md5mesh import
 
-def read_md5mesh(context, path, matrix, mergeVertices, boneLayer):
+def read_md5mesh(context, path, matrix, mergeVertices):
     meshName = path.split(os.sep)[-1].split(".")[-2]
     collection = bpy.data.collections.new(meshName)
     context.scene.collection.children.link(collection)
@@ -234,7 +298,7 @@ def read_md5mesh(context, path, matrix, mergeVertices, boneLayer):
     m = None
     while not m:
         m = js_re.match(md5mesh.pop(0))
-    arm_o, ms = do_joints(context, md5mesh, j_re, e_re, matrix, meshName, collection, boneLayer)
+    arm_o, ms = do_joints(context, md5mesh, j_re, e_re, matrix, meshName, collection)
     pairs = []
     while md5mesh:
         mat_name, bm = do_mesh(md5mesh, s_re, v_re, t_re, w_re, e_re, n_re, ms)
@@ -309,7 +373,7 @@ def do_mesh(md5mesh, s_re, v_re, t_re, w_re, e_re, n_re, ms):
             ln[uvs].uv = (u0, 1.0 - v0)
     return mat_name, bm
 
-def do_joints(context, md5mesh, j_re, e_re, correctMatrix, meshName, collection, boneLayer):
+def do_joints(context, md5mesh, j_re, e_re, correctMatrix, meshName, collection):
     joints = {}
     jdata = gather(j_re, e_re, md5mesh)
     for i, jd in enumerate(jdata):
@@ -338,31 +402,13 @@ def do_joints(context, md5mesh, j_re, e_re, correctMatrix, meshName, collection,
         eb.matrix = mtx
         eb.length = 5.0
     bpy.ops.object.mode_set()
-    for b in arm.bones:
-        b.layers[boneLayer] = True
     return arm_o, ms
 
 ### .md5anim import functions
 
-def read_md5anim(context, fullPath, animName, prepend, correctionMatrix):
-
-    # label = fullPath.split(os.sep)[-1].split(".")[-2]
-    # action_name = label
-
-    ao = context.active_object
-    skel = bone_tree_blender(ao.data, context.window_manager.md5_prop.boneLayer_idx - 1)
-
-    print("Importing anim " + animName)
-
-    if not ao.animation_data:
-        ao.animation_data_create()
-
-    if prepend:
-        prefix = "(" + ao.name.replace("_MD5_Armature", "") + ")_"
-        animName = prefix+animName
-
-    ao.animation_data.action = bpy.data.actions.new(name=animName)
-    action = ao.animation_data.action
+def read_md5anim(context, fullPath, correctionMatrix, ao, action):
+    ''' read anim files'''
+    skel = bone_tree_blender(ao.data)
 
     fh = open(fullPath, "r")
     md5anim = fh.readlines()
@@ -374,15 +420,6 @@ def read_md5anim(context, fullPath, animName, prepend, correctionMatrix):
     bf0_re = re.compile("\s*(baseframe)\s+{.*")
     bf1_re = re.compile("\s*\("+w*3+"\s+\)\s+\("+w*3+"\s+\).*")
     f_re = re.compile("\s*(frame).*")
-
-    ## uncomment code below to set the render frame rate to match the animation frame rate
-    #md5frate_re = re.compile("(frameRate)\s\d+")
-    #frlist = list(filter(md5frate_re.match,md5anim))
-    #if frlist:
-    #    m = re.search('\d+', frlist.pop(0))
-    #    if m:
-    #        md5frate = int(format(m.group()))
-    #        context.scene.render.fps = md5frate
 
     hier = gather(j_re, e_re, md5anim)
     for i, hi in enumerate(hier):
@@ -567,8 +604,8 @@ def restore_quat(rx, ry, rz):
         return (0.0, rx, ry, rz)
     return (-math.sqrt(t), rx, ry, rz)
 
-def bone_tree_blender(arm, bl):
-    return btb(None, [b for b in arm.bones if b.layers[bl]])
+def bone_tree_blender(arm):
+    return btb(None, [b for b in arm.bones if b.use_deform])
 
 def btb(b, bs):
     ''' recursive; shouldn't matter for poxy md5 skeletons '''
@@ -728,7 +765,7 @@ def make_baseframe_block(bones, correctionMatrix):
         xPos, yPos, zPos = bMatrix.translation
         xOrient, yOrient, zOrient = (-bMatrix.to_quaternion()).normalized()[1:]
         block.append(
-            "\n( {} {} {} ) ( {} {} {} )\n".format(
+            "\t( {} {} {} ) ( {} {} {} )\n".format(
                 prnt_f(xPos), prnt_f(yPos), prnt_f(zPos),
                 prnt_f(xOrient), prnt_f(yOrient), prnt_f(zOrient)))
     block.append("}\n\n")
@@ -873,7 +910,7 @@ def write_md5mesh(filePath, prerequisites, correctionMatrix, fixWindings):
     return
 
 def write_md5anim(context, filePath, prerequisites, correctionMatrix,
-                  previewKeys, frame_range, baseframeAnim):
+                  previewKeys, frame_range, baseframeTPose):
     '''
     export the .md5anim for the action currently
     associated with the armature animation'''
@@ -897,12 +934,13 @@ def write_md5anim(context, filePath, prerequisites, correctionMatrix,
         boneIndexLookup[b.name] = bones.index(b)
     hierarchy = make_hierarchy_block(bones, boneIndexLookup)
 
-    baseframe = make_baseframe_block(bones, correctionMatrix)
     genBaseFrame = False
-
-    if baseframeAnim:
+    if not baseframeTPose:
+        # write animated frame 1 to baseframe
         baseframe = ["baseframe {\n"]
         genBaseFrame = True
+    else:
+        baseframe = make_baseframe_block(bones, correctionMatrix)
 
     bounds = []
     frames = []
@@ -999,8 +1037,6 @@ def concat_strings(strings):
 def md5_error_messages(context, eid, *details):
     ''' print error message '''
 
-    bl = str(context.window_manager.md5_prop.boneLayer_idx)
-
     if eid == 'no_selection':
         return ("Nothing selected to export.\n" +
                 "Please select an object in the collection" +
@@ -1018,25 +1054,16 @@ def md5_error_messages(context, eid, *details):
         return ("No deforming armature is associated with the selected object or it's collection.\n" +
                 "Select the collection, or an object in the collection you want to export, and try again.")
     if eid == 'layer_empty':
-        return ("The deforming armature in the collection has no bones in layer " + bl + ".\n" +
-                "Add all of the bones you want to export to the armature's layer " + bl + "," +
-                " or change the reserved bone layer in the scene properties, and retry export.\n" +
-                "Bone layers can be managed in the 'Object Data Properties' section of the" +
-                " properties toolbar of the armature.")
+        return ("The deforming armature in the collection has no bones.\n" +
+                "Add bones to armature or check that 'Deform' is enabled on your deforming bones")
     if eid == 'missing_parents':
-        return ("One or more bones in the armature have parents outside layer " + bl + ".\n" +
-                "Revise your armature's layer " + bl + " membership," +
-                " or change the reserved bone layer, and retry export.\n" +
-                "Note: Bone layers can be managed in the 'Object Data Properties' section of the" +
-                " properties toolbar of the armature.\n" +
+        return ("One or more bones in the armature have missing/invalid parents.\n" +
+                "Include the parent bones(listed below) for export by enabling the 'Deform' option on each bone.\n" +
                 "Offending bones: " + concat_strings(details[0]))
     if eid == 'orphans':
         return ("There are multiple root bones (listed below)" +
                 " in the export-bound collection, but only one root bone is allowed in MD5.\n" +
-                "Revise your armature's layer " + bl + " membership," +
-                " or change the reserved bone layer and retry export.\n" +
-                "Note: Bone layers can be managed in the 'Object Data Properties' section of the" +
-                " properties toolbar of the armature.\n" +
+                "Revise your armature's tree structure or check bone 'Deform' option so its parent is included.\n" +
                 "Root bones: " + concat_strings(details[0]))
     if eid == 'unweighted_verts':
         return ("The '" + details[0][0] + "' object contains " + str(details[0][1]) +
@@ -1063,7 +1090,8 @@ def md5_error_messages(context, eid, *details):
                 "Select a valid armature or object in the desired collection, and retry import.")
     if eid == 'no_arm_match':
         return ("The selected armature does not match the skeleton" +
-                " in the file you are trying to import.")
+                " in the file you are trying to import.\n" +
+                "Make sure the bone names match and 'Deform' is checked on those bones.")
 
     return "Unhandled error"
 
@@ -1090,8 +1118,7 @@ def check_weighting(obj, bm, bones):
     return (unweightedVerts, zeroWeightVerts)
 
 def is_export_go(context, what, collection):
-    bl = context.window_manager.md5_prop.boneLayer_idx - 1
-    meshObjects = []
+    deformOnly = context.window_manager.md5_prop.export_onlyDeformBones
 
     #support single mesh export.
     #only supported by commandline, normal export is still as documented.
@@ -1104,14 +1131,17 @@ def is_export_go(context, what, collection):
             o for o in bpy.data.collections[collection.name].objects
             if o.data in bpy.data.meshes[:] and o.find_armature()]
         meshObjects.sort(key=lambda o: o.name) #sort by name. for skin files
-
     if not meshObjects:
         return ['no_deformables', None]
     armatures = [a.find_armature() for a in meshObjects]
     armature = armatures[0]
     if armatures.count(armature) < len(meshObjects):
         return ['multiple_armatures', None]
-    bones = [b for b in armature.data.bones if b.layers[bl]]
+    if deformOnly:
+        # bpy.types.Bone
+        bones = [b for b in armature.data.bones if b.use_deform]
+    else:
+        bones = armature.data.bones
     if not bones:
         return ['layer_empty', None]
     rootBones = [i for i in bones if not i.parent]
@@ -1170,57 +1200,9 @@ def export_validation(context, what): #, collection):
     md5_prop.errorMsg = checkResult[0] + " see Console"
     return False # {'CANCELLED'}
 
-def manage_bone_layers(context, doWhat):
-    bl = context.window_manager.md5_prop.boneLayer_idx - 1
-    mode = context.mode
-    if mode == 'POSE':
-        allBones = [pb.bone for pb in context.active_object.pose.bones]
-        selBones = [pb.bone for pb in context.selected_pose_bones]
-    elif mode == 'EDIT_ARMATURE':
-        allBones = context.active_object.data.edit_bones
-        selBones = context.selected_editable_bones
-    else:
-        return
-    unselBones = [b for b in allBones if b not in selBones]
-    if doWhat == 'replace':
-        for x in selBones:
-            x.layers[bl] = True
-        for y in unselBones:
-            y.layers[bl] = False
-        return
-    if doWhat == 'add':
-        for x in selBones:
-            x.layers[bl] = True
-        return
-    if doWhat == 'remove':
-        for x in selBones:
-            x.layers[bl] = False
-        return
-    if doWhat == 'clear':
-        for x in allBones:
-            x.layers[bl] = False
-        return
-    return
-
 def delete_action(context, prepend, actionNameToDelete):
-
-    print("Deleting Action prepend: %s, action name %s", prepend, actionNameToDelete)
-    ao = context.active_object
-    collection = ao.users_collection[0]
-
-    meshObjects = [
-        o for o in bpy.data.collections[collection.name].objects
-        if o.data in bpy.data.meshes[:] and o.find_armature()]
-
-    armatures = [a.find_armature() for a in meshObjects]
-    armature = armatures[0]
-    if prepend:
-        actionName = "("+collection.name+")_"+actionNameToDelete
-
-    if armature.animation_data.action.name == actionName:
-
-        bpy.data.actions.remove(bpy.data.actions[actionName])
-
+    print("Deleting Action: {}".format(actionNameToDelete))
+    bpy.data.actions.remove(bpy.data.actions[actionNameToDelete])
     return
 
 def remove_prefix(text, prefix):
@@ -1232,39 +1214,16 @@ def remove_prefix(text, prefix):
 
 ### Import UI
 
-class ImportMD5Mesh(Operator, ImportHelper):
+class ImportMD5Mesh(Operator, ImportHelper, MD5_Common_Prop):
     '''Import an .MD5mesh file as a new Collection'''
     bl_idname = "import_scene.import_md5mesh"
-    bl_label = 'Import MD5MESH'
+    bl_label = 'Import MD5 Mesh'
     bl_options = {'PRESET'}
     filename_ext = ".md5mesh"
-    path_mode = path_reference_mode
-    check_extension = True
 
     filter_glob = StringProperty(
         default="*.md5mesh",
         options={'HIDDEN'}
-    )
-    reorientDegrees = EnumProperty(
-        items=(('0', '0 Degrees', 'Do not reorient'),
-               ('90', '90 Degrees ( X to Y )', 'Rotate 90 degrees (e.g. reorient facing +X to facing +Y)'),
-               ('-90', '-90 Degrees ( Y to X )', 'Rotate -90 degrees (e.g. reorient facing +Y to facing +X'),
-               ('180', '180 Degrees', 'Rotate 180 degrees')),
-        name="Reorient Model",
-        description=(
-            "Degrees to rotate model during import.\n" +
-            " Useful to reorient models to face Y axis if desired.\n" +
-            " 90 Degrees rotates clockwise from above.\n" +
-            " -90 Rotates counter-clockwise from above."),
-        default='0'
-    )
-    scaleFactor = bpy.props.FloatProperty(
-        name="Scale",
-        description="Scale all data",
-        min=0.01, max=1000.0,
-        soft_min=0.01,
-        soft_max=1000.0,
-        default=1.0
     )
     mergeVerticesCM = bpy.props.FloatProperty(
         name="Merge Vertices",
@@ -1274,15 +1233,6 @@ class ImportMD5Mesh(Operator, ImportHelper):
         soft_max=1.00,
         default=0.00
     )
-    boneLayer = bpy.props.IntProperty(
-        name="Bone Layer",
-        description=(
-            "Bones will be assigned to this layer.\n" +
-            " If changed, remember that only bones in the layer defined in the 'Object Data Properties'" +
-            " of the armature will be exported, so make sure they match."),
-        min=1, max=32,
-        default=5
-    )
 
     def execute(self, context):
         rotdeg = float(self.reorientDegrees)
@@ -1290,25 +1240,23 @@ class ImportMD5Mesh(Operator, ImportHelper):
 
         scaleTweak = Matrix.Scale(self.scaleFactor, 4)
         correctionMatrix = orientationTweak @ scaleTweak
-        context.window_manager.md5_prop.boneLayer_idx = self.boneLayer
 
         read_md5mesh(
             context, self.filepath, correctionMatrix,
-            self.mergeVerticesCM * 0.01, self.boneLayer-1)
+            self.mergeVerticesCM * 0.01)
+        self.report({'INFO'}, "Mesh Imported")
         return {'FINISHED'}
 
 
-class ImportMD5Anim(Operator, ImportHelper):
-    '''
-    Import one or more .MD5anim files into dopesheet actions associated
-    with the collection of the active object.
-    '''
+class ImportMD5Anim(Operator, ImportHelper, MD5_Common_Prop):
+    ''' Import .MD5anim files '''
     bl_idname = "import_scene.import_md5anim"
-    bl_label = 'Import MD5ANIM'
+    bl_label = 'Import MD5 Anim'
     bl_options = {'PRESET'}
+    bl_description = (
+        "Import one or more .MD5anim files into dopesheet actions associated" +
+        " with the collection of the active object")
     filename_ext = ".md5anim"
-    path_mode = path_reference_mode
-    check_extension = True
 
     prepend = BoolProperty(
         name="Prepend action name",
@@ -1328,36 +1276,12 @@ class ImportMD5Anim(Operator, ImportHelper):
     directory = StringProperty(
         subtype='DIR_PATH'
     )
-    reorientDegrees = EnumProperty(
-        items=(('0', '0 Degrees', 'Do not reorient'),
-               ('90', '90 Degrees ( X to Y )', 'Rotate 90 degrees (e.g. reorient facing +X to facing +Y)'),
-               ('-90', '-90 Degrees ( Y to X )', 'Rotate -90 degrees (e.g. reorient facing +Y to facing +X'),
-               ('180', '180 Degrees', 'Rotate 180 degrees')),
-        name="Reorient Animation",
-        description=(
-            "Degrees to rotate animation during import.\n" +
-            " Useful to reorient to face Y axis if desired.\n" +
-            " 90 Degrees rotates clockwise from above.\n" +
-            " -90 Rotates counter-clockwise from above."),
-        default='0'
-    )
-    scaleFactor = bpy.props.FloatProperty(
-        name="Scale",
-        description="Scale all data",
-        min=0.01, max=1000.0,
-        soft_min=0.01,
-        soft_max=1000.0,
-        default=1.0
-    )
     md5_export_helpText = [
-        ".MD5anim import Help",
-        "  Select one or more .md5anim files",
+        "Select one or more .md5anim files",
         "  to import as Blender actions.",
-        "  Batch import supported.",
-        "  After import, actions are available",
+        "Actions are available",
         "  in the dopesheet action editor.",
-        "Note: make sure correct mesh",
-        " was loaded first."
+        "Note: Load a valid mesh first."
     ]
 
     def draw(self, context):
@@ -1365,9 +1289,9 @@ class ImportMD5Anim(Operator, ImportHelper):
         row = layout.column_flow(columns=1, align=False)
         row.use_property_split = True
         row.prop(self, "path_mode", )
-        row.prop(self, "prepend")
         row.prop(self, "reorientDegrees")
         row.prop(self, "scaleFactor")
+        row.prop(self, "prepend")
 
         # help window
         box = layout.box()
@@ -1392,18 +1316,16 @@ class ImportMD5Anim(Operator, ImportHelper):
             collection = context.view_layer.active_layer_collection
 
         print(collection)
-        if collection.has_objects():
-            meshObjects = [
-                o for o in bpy.data.collections[collection.name].objects
-                if o.data in bpy.data.meshes[:] and o.find_armature()]
-
+        meshObjects = [
+            o for o in bpy.data.collections[collection.name].objects
+            if o.data in bpy.data.meshes[:] and o.find_armature()]
+        if len(meshObjects):
             armatures = [a.find_armature() for a in meshObjects]
-            if meshObjects:
-                armature = armatures[0]
-                if armature.data.bones[:]:
-                    context.view_layer.objects.active = armature
-                    context.window_manager.fileselect_add(self)
-                    return {'RUNNING_MODAL'}
+            armature = armatures[0]
+            if armature.data.bones[:]:
+                context.view_layer.objects.active = armature
+                context.window_manager.fileselect_add(self)
+                return {'RUNNING_MODAL'}
 
         # no valid armature selected or in the active collection
         msg = md5_error_messages(context, "no_arm")
@@ -1412,172 +1334,120 @@ class ImportMD5Anim(Operator, ImportHelper):
         # self.report({'ERROR'}, msg)
         return {'CANCELLED'}
 
-
     def execute(self, context):
         errors = 0
         successes = 0
         errorString = ""
         res = []
-        msg2 = ""
 
         rotdeg = float(self.reorientDegrees)
         orientationTweak = Matrix.Rotation(math.radians(rotdeg), 4, 'Z')
         scaleTweak = Matrix.Scale(self.scaleFactor, 4)
         correctionMatrix = orientationTweak @ scaleTweak
 
+        ao = context.active_object
+        if not ao.animation_data:
+            ao.animation_data_create()
+
         for newAnim in self.files:
-            fullAnimPath = os.path.join(self.directory, newAnim.name)
+            actionName = newAnim.name
+            fullAnimPath = os.path.join(self.directory, actionName)
             print("Importing: " + fullAnimPath)
 
+            if self.prepend:
+                prefix = "(" + ao.name.replace("_MD5_Armature", "") + ")_"
+                actionName = prefix + actionName
+
+            action = bpy.data.actions.new(name=actionName) # new action
+            actionName = action.name # get unique name
+
             try:
-                msg, res = read_md5anim(context, fullAnimPath, newAnim.name, self.prepend, correctionMatrix)
+                msg, res = read_md5anim(
+                    context, fullAnimPath, correctionMatrix, ao, action)
                 if res == {'CANCELLED'}:
                     self.report({'ERROR'}, msg)
                     print(msg)
                     errors = errors + 1
                     errorString = errorString + newAnim.name + ","
-                    #return res
-
-                    #delete the newly created action since it failed
-                    delete_action(context, self.prepend, newAnim.name)
-
+                    delete_action(context, self.prepend, actionName)
                 else:
                     successes = successes + 1
+                    # set active anim
+                    ao.animation_data.action = action
             except:
                 errors = errors + 1
                 errorString = errorString + newAnim.name + ","
-                #delete the newly created action since it failed
-                delete_action(context, self.prepend, newAnim.name)
+                delete_action(context, self.prepend, actionName)
                 continue
 
-        msg = str(successes) + " md5anim files successfully imported as actions.\n"
+        msg = str(successes) + " .md5anim files successfully imported as actions.\n"
 
         if errors >= 1:
-            msg = msg + "ERROR! The following" + str(errors) + " imports failed - see System Console for details.\n" + errorString
+            msg = msg + "ERROR! The following " + str(errors) + " imports failed - see System Console for details.\n" + errorString
 
         bpy.ops.message.md5_messagebox('INVOKE_DEFAULT', message=msg)
 
         if res:
+            if errors == 0:
+                self.report({'INFO'}, "Animation Imported")
             return res
         else:
             return {'CANCELLED'}
 
-### Bone layer management
 
-class MD5BonesAdd(Operator):
-    '''Add the selected bones to the bone layer reserved for MD5'''
-    bl_idname = "data.md5_bones_add"
-    bl_label = 'Add Selected'
-    def invoke(self, context, event):
-        manage_bone_layers(context, 'add')
-        return {'FINISHED'}
-
-class MD5BonesRemove(Operator):
-    '''Remove the selected bones from the bone layer reserved for MD5'''
-    bl_idname = "data.md5_bones_remove"
-    bl_label = 'Remove Selected'
-    def invoke(self, context, event):
-        manage_bone_layers(context, 'remove')
-        return {'FINISHED'}
-
-class MD5BonesReplace(Operator):
-    '''Include only the selected bones in the bone layer reserved for MD5'''
-    bl_idname = "data.md5_bones_replace"
-    bl_label = 'Replace with Selected'
-    def invoke(self, context, event):
-        manage_bone_layers(context, 'replace')
-        return {'FINISHED'}
-
-class MD5BonesClear(Operator):
-    '''Clear the bone layer reserved for MD5'''
-    bl_idname = "data.md5_bones_clear"
-    bl_label = 'Clear All'
-    def invoke(self, context, event):
-        manage_bone_layers(context, 'clear')
-        return {'FINISHED'}
-
-class MD5Panel(bpy.types.Panel):
-    """MD5 parameters panel in the scene context of the properties editor"""
-    bl_label = "MD5 Export Setup"
-    bl_idname = "DATA_PT_md5"
-    bl_space_type = 'PROPERTIES'
-    bl_region_type = 'WINDOW'
-    bl_context = "data"
+class VIEW3D_PT_MD5Panel(Panel):
+    """ MD5 parameters panel in the scene context of the properties editor """
+    bl_label = "MD5 Models"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'TOOLS' if check_version(2, 80, 0) < 0 else 'UI'
+    bl_category = 'MD5-Models'
 
     def draw(self, context):
         md5_props = context.window_manager.md5_prop
         layout = self.layout
-        bl = str(md5_props.boneLayer_idx)
-        layout.prop(md5_props, "boneLayer_idx")
 
-        column1 = layout.column()
-        column1.label(text="Manage layer " + bl + " membership:")
-        column2 = column1.column(align=True)
-        column2.operator("data.md5_bones_add")
-        column2.operator("data.md5_bones_remove")
-        column2.operator("data.md5_bones_replace")
-        column2.operator("data.md5_bones_clear")
-        if context.mode in {'POSE', 'EDIT_ARMATURE'}:
-            column1.enabled = True
-        else:
-            column1.enabled = False
+        # import buttons
+        box = layout.box()
+        col1 = box.column()
+        col1.label(text="Import:")
+        col2 = box.column()
+        col2.scale_y = 1.4
+        col2.operator_context = 'INVOKE_DEFAULT'
+        col2.operator("import_scene.import_md5mesh", text="MD5 Mesh", icon='OUTLINER_OB_MESH')
+        col2.operator("import_scene.import_md5anim", text="MD5 Anim", icon='OUTLINER_OB_ARMATURE')
 
-        #export buttons
-        layout.prop(md5_props, "export_sel_mesh")
-        col3 = layout.column()
-        col3.operator_context = 'INVOKE_DEFAULT'
-        col3.scale_y = 1.4
-        col3.operator("export_scene.export_md5mesh", icon='OUTLINER_OB_MESH')
-        col3.operator("export_scene.export_md5anim", icon='OUTLINER_OB_ARMATURE')
-        col3.operator("export_scene.export_md5batch", icon='PACKAGE')
+        # export buttons
+        box = layout.box()
+        col1 = box.column()
+        col1.label(text="Export:")
+        col1.prop(md5_props, "export_onlySelectedMesh")
+        col1.prop(md5_props, "export_onlyDeformBones")
+        col2 = box.column()
+        col2.scale_y = 1.4
+        col2.operator_context = 'INVOKE_DEFAULT'
+        col2.operator("export_scene.export_md5mesh", text="MD5 Mesh", icon='OUTLINER_OB_MESH')
+        col2.operator("export_scene.export_md5anim", text="MD5 Animations", icon='OUTLINER_OB_ARMATURE')
+        col2.operator("export_scene.export_md5batch", text="MD5 Mesh+Anim", icon='PACKAGE')
 
 ### Export UI
 
-class ExportMD5Mesh(Operator, ExportHelper):
+class ExportMD5Mesh(Operator, ExportHelper, MD5_Common_Prop, MD5_CommonMesh_Prop):
     '''Export All objects in the parent collection of the active object as an .MD5mesh.'''
     bl_idname = "export_scene.export_md5mesh"
     bl_label = 'Export MD5 Mesh'
     # bl_options = {'PRESET'}
     filename_ext = ".md5mesh"
-    path_mode = path_reference_mode
-    check_extension = True
 
     filter_glob = StringProperty(
         default="*.md5mesh",
         options={'HIDDEN'},
-    )
-    reorientDegrees = EnumProperty(
-        items=(('0', '0 Degrees', 'Do not reorient'),
-               ('90', '90 Degrees ( X to Y )', 'Rotate 90 degrees (e.g. reorient facing +X to facing +Y)'),
-               ('-90', '-90 Degrees ( Y to X )', 'Rotate -90 degrees (e.g. reorient facing +Y to facing +X'),
-               ('180', '180 Degrees', 'Rotate 180 degrees')),
-        name="Reorient Model",
-        description=(
-            "Degrees to rotate model during export." +
-            " Useful to reorient models to face Y axis if desired.\n" +
-            " 90 Degrees rotates clockwise from above.\n" +
-            " -90 Rotates counter-clockwise from above."),
-        default='0'
-    )
-    scaleFactor = FloatProperty(
-        name="Scale",
-        description="Scale all data",
-        min=0.01, max=1000.0,
-        soft_min=0.01,
-        soft_max=1000.0,
-        default=1.0,
-    )
-    fixWindings = BoolProperty(
-        name="Fix tri indices for eye deform",
-        description="Only select if having issues with materials flagged with eyeDeform",
-        default=False
     )
 
     def invoke(self, context, event):
         md5_prop = context.window_manager.md5_prop
         md5_prop.clear()
 
-        if md5_prop.export_sel_mesh:
+        if md5_prop.export_onlySelectedMesh:
             exp_type = 'mesh'
         else:
             exp_type = 'meshes'
@@ -1601,53 +1471,26 @@ class ExportMD5Mesh(Operator, ExportHelper):
         write_md5mesh(
             self.filepath, md5_prop.getBoneMesh(),
             correctionMatrix, self.fixWindings)
+        self.report({'INFO'}, "Mesh Exported")
         return {'FINISHED'}
 
 
-class ExportMD5Anim(Operator, ExportHelper):
+class ExportMD5Anim(Operator, ExportHelper, MD5_Common_Prop, MD5_CommonAnim_Prop):
     '''Export the action currently associated with the active object as an .MD5anim'''
     bl_idname = "export_scene.export_md5anim"
     bl_label = 'Export MD5 Animations'
     filename_ext = ".md5anim"
-    path_mode = path_reference_mode
-    check_extension = True
 
     filter_glob = StringProperty(
         default="*.md5anim",
         options={'HIDDEN'},
     )
-    reorientDegrees = EnumProperty(
-        items=(('0', '0 Degrees', 'Do not reorient'),
-               ('90', '90 Degrees ( X to Y )', 'Rotate 90 degrees (e.g. reorient facing +X to facing +Y)'),
-               ('-90', '-90 Degrees ( Y to X )', 'Rotate -90 degrees (e.g. reorient facing +Y to facing +X'),
-               ('180', '180 Degrees', 'Rotate 180 degrees')),
-        name="Reorient Anim",
-        description=(
-            "Degrees to rotate animation during export." +
-            " Useful to reorient animations to face Y axis if desired.\n" +
-            " 90 Degrees rotates clockwise from above.\n" +
-            " -90 Rotates counter-clockwise from above."),
-        default='0'
-    )
-    scaleFactor = FloatProperty(
-        name="Scale",
-        description="Scale all data",
-        min=0.01, max=1000.0,
-        soft_min=0.01,
-        soft_max=1000.0,
-        default=1.0,
-    )
     previewKeysOnly = BoolProperty(
-        name="Use timeline Start/End frames.",
+        name="Use timeline",
         description=(
-            "Only export frames indicated by timeline preview 'Start' and 'End' frames values" +
-            " - otherwise all action frames will be exported."),
+            "Only export frames indicated by timeline preview 'Start' and 'End' frames values.\n" +
+            "Disabled: all action frames will be exported."),
         default=False,
-    )
-    baseframeAnim = BoolProperty(
-        name="Baseframe = 1st anim frame.",
-        description="Use the values from the first frame of animation to generate the baseframe.",
-        default=True,
     )
 
     def invoke(self, context, event):
@@ -1680,88 +1523,38 @@ class ExportMD5Anim(Operator, ExportHelper):
             correctionMatrix,
             self.previewKeysOnly,
             armatures[0].animation_data.action.frame_range,
-            self.baseframeAnim)
+            self.baseframeTPose)
+        self.report({'INFO'}, "Animation Exported")
         return {'FINISHED'}
 
 
-class ExportMD5Batch(Operator, ExportHelper):
+class ExportMD5Batch(Operator, ExportHelper, MD5_Common_Prop, MD5_CommonMesh_Prop, MD5_CommonAnim_Prop):
     '''Export all objects in the parent collection of the active object as an .MD5mesh.
     Export the active action or all actions as .MD5anim files'''
     bl_idname = "export_scene.export_md5batch"
     bl_label = 'Export MD5 Mesh+Anim'
-    # bl_options = {'PRESET'}
-
     filename_ext = ".md5mesh"
-    path_mode = path_reference_mode
-    check_extension = True
 
     filter_glob = StringProperty(
         default="*.md5mesh",
         options={'HIDDEN'},
     )
-    exportAllAnims = BoolProperty(
-        name="Export All Anims",
-        description=(
-            "Export all actions associated with the object/collection as MD5 anims.\n" +
-            " All keyframes for each action will be exported.\n" +
-            " ( This exports all actions in the action editor that are prepended with the object/collection name. )"),
-        default=True,
-    )
-    onlyPrepend = BoolProperty(
-        name="Prepended action names only",
-        description="Only export actions prepended with the collection name.",
-        default=False,
-    )
     stripPrepend = BoolProperty(
-        name="Strip action name prepend",
+        name="Save Without Prefix",
         description="Strip the prepended collection name from exported action names.",
         default=True,
     )
-    previewKeysOnly = BoolProperty(
-        name="Use timeline Start/End frames",
-        description=(
-            "Only export frames indicated by timeline preview 'Start' and 'End' frames values \n" +
-            " - otherwise all action frames will be exported.\n" +
-            " Has no effect if 'Export All Anims' is selected."),
+    onlyPrepend = BoolProperty(
+        name="Only Prefixed Actions",
+        description="Only export actions prepended with the collection name.",
         default=False,
-    )
-    reorientDegrees = EnumProperty(
-        items=(('0', '0 Degrees', 'Do not reorient'),
-               ('90', '90 Degrees ( X to Y )', 'Rotate 90 degrees (e.g. reorient facing +X to facing +Y)'),
-               ('-90', '-90 Degrees ( Y to X )', 'Rotate -90 degrees (e.g. reorient facing +Y to facing +X'),
-               ('180', '180 Degrees', 'Rotate 180 degrees')),
-        name="Reorient Model/Anims",
-        description=(
-            "Degrees to rotate model/anims during export.\n" +
-            " Useful to reorient to face Y axis if desired.\n" +
-            " 90 Degrees rotates clockwise from above.\n" +
-            "-90 Rotates counter-clockwise from above."),
-        default='0'
-    )
-    scaleFactor = FloatProperty(
-        name="Scale",
-        description="Scale all data",
-        min=0.01, max=1000.0,
-        soft_min=0.01,
-        soft_max=1000.0,
-        default=1.0,
-    )
-    fixWindings = BoolProperty(
-        name="Fix tri indices for eye deform",
-        description="Only select if having issues with materials flagged with eyeDeform",
-        default=False
-    )
-    baseframeAnim = BoolProperty(
-        name="Baseframe = 1st anim frame.",
-        description="Use the values from the first frame of animation to generate the baseframe.",
-        default=True,
     )
 
     def invoke(self, context, event):
         md5_prop = context.window_manager.md5_prop
         md5_prop.clear()
 
-        if md5_prop.export_sel_mesh:
+        if md5_prop.export_onlySelectedMesh:
             exp_type = 'mesh'
         else:
             exp_type = 'batch'
@@ -1789,44 +1582,26 @@ class ExportMD5Batch(Operator, ExportHelper):
         #write the mesh
         write_md5mesh(self.filepath, (bones, meshObjects), correctionMatrix, self.fixWindings)
 
-        if not self.exportAllAnims:
+        # write all frames for all actions
+        oldAction = armature.animation_data.action
+        for exportAction in bpy.data.actions:
+            name = exportAction.name
+            frame_range = exportAction.frame_range
+            print("Checking action name " + name + " to see if in collection " + collection_Prefix)
+            if not self.onlyPrepend or name.startswith(collection_Prefix):
+                #export this action
+                armature.animation_data.action = exportAction
+                if self.stripPrepend:
+                    name = remove_prefix(name, collection_Prefix)
+                if not name.endswith(".md5anim"):
+                    name = name + ".md5anim"
+                self.filepath = os.path.join(batch_directory, name)
+                print("Exporting animation "+self.filepath)
+                write_md5anim(context, self.filepath, (bones, meshObjects), correctionMatrix,
+                                False, frame_range, self.baseframeTPose)
 
-            # write the active action
-            action = armature.animation_data.action
-            name = action.name
-            frame_range = action.frame_range
-
-            if self.stripPrepend:
-                name = remove_prefix(name, collection_Prefix)
-            if not name.endswith(".md5anim"):
-                name = name + ".md5anim"
-            self.filepath = os.path.join(batch_directory, name)
-            print("Exporting animation "+self.filepath)
-            write_md5anim(context, self.filepath, (bones, meshObjects), correctionMatrix,
-                          self.previewKeysOnly, frame_range, self.baseframeAnim)
-        else:
-
-            # write all frames for all actions
-            oldAction = armature.animation_data.action
-            for exportAction in bpy.data.actions:
-                name = exportAction.name
-                frame_range = exportAction.frame_range
-                print("Checking action name " + name + " to see if in collection " + collection_Prefix)
-                if name.startswith(collection_Prefix) or not self.onlyPrepend:
-                    #export this action
-                    armature.animation_data.action = exportAction
-
-                    if self.stripPrepend:
-                        name = remove_prefix(name, collection_Prefix)
-                    if not name.endswith(".md5anim"):
-                        name = name + ".md5anim"
-                    self.filepath = os.path.join(batch_directory, name)
-                    print("Exporting animation "+self.filepath)
-                    write_md5anim(context, self.filepath, (bones, meshObjects), correctionMatrix,
-                                  False, frame_range, self.baseframeAnim)
-
-            armature.animation_data.action = oldAction
-
+        armature.animation_data.action = oldAction
+        self.report({'INFO'}, "Mesh+Anims Exported")
         return {'FINISHED'}
 
 
@@ -1896,20 +1671,20 @@ def menu_func_export_batch(self, context):
 classes = (
     ImportMD5Mesh,
     ImportMD5Anim,
-    MD5BonesAdd,
-    MD5BonesRemove,
-    MD5BonesReplace,
-    MD5BonesClear,
-    MD5Panel,
     ExportMD5Mesh,
     ExportMD5Anim,
     ExportMD5Batch,
     MD5_MessageBox,
     MD5_GlobalProps,
+    VIEW3D_PT_MD5Panel,
 )
 
 
 def register():
+    make_annotations(MD5_Common_Prop)
+    make_annotations(MD5_CommonMesh_Prop)
+    make_annotations(MD5_CommonAnim_Prop)
+
     for cls in classes:
         make_annotations(cls)
         register_class(cls)
