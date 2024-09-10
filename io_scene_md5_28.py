@@ -33,10 +33,6 @@ update by hypov8
 -export all anims option removed from batch export. all is now default.
 -cleaned up properties for dialog boxes, duplicated moved to a common class.
 
-2024-09-10
--exporter ignores hidden objects in the active layer
-
-
 todo
 ====
 replace numpy for floats
@@ -110,6 +106,10 @@ class MD5_GlobalProps(PropertyGroup, Armature):
     bone_list = []
     mesh_list = []
 
+    pre_tests = BoolProperty(
+        name="pre_test",
+        default=False
+    )
     boneLayer_idx = IntProperty(
         name="Bone Layer id",
         description="Bone layer reserved for MD5 export",
@@ -155,6 +155,7 @@ class MD5_GlobalProps(PropertyGroup, Armature):
         self.armature_list.clear()
         self.bone_list.clear()
         self.mesh_list.clear()
+        self.pre_tests = False
         self.errorMsg = ""
 
     def getCollection(self):
@@ -909,7 +910,7 @@ def write_md5mesh(filePath, prerequisites, correctionMatrix, fixWindings):
     return
 
 def write_md5anim(context, filePath, prerequisites, correctionMatrix,
-                  useTimeline, frame_range, baseframeTPose):
+                  previewKeys, frame_range, baseframeTPose):
     '''
     export the .md5anim for the action currently
     associated with the armature animation'''
@@ -918,7 +919,7 @@ def write_md5anim(context, filePath, prerequisites, correctionMatrix,
 
     goBack = context.scene.frame_current
 
-    if useTimeline:
+    if previewKeys:
         startFrame = context.scene.frame_preview_start
         endFrame = context.scene.frame_preview_end
     else:
@@ -1128,7 +1129,7 @@ def is_export_go(context, what, collection):
     else: # 'meshes' 'anim' 'batch'
         meshObjects = [
             o for o in bpy.data.collections[collection.name].objects
-            if o.data in bpy.data.meshes[:] and o.find_armature() and not o.hide_get()]
+            if o.data in bpy.data.meshes[:] and o.find_armature()]
         meshObjects.sort(key=lambda o: o.name) #sort by name. for skin files
     if not meshObjects:
         return ['no_deformables', None]
@@ -1190,6 +1191,7 @@ def export_validation(context, what): #, collection):
 
     checkResult = is_export_go(context, what, collection)
     if checkResult[0] == 'ok':
+        md5_prop.pre_tests = True
         md5_prop.addCollection(checkResult[-1])
         return True
 
@@ -1483,7 +1485,7 @@ class ExportMD5Anim(Operator, ExportHelper, MD5_Common_Prop, MD5_CommonAnim_Prop
         default="*.md5anim",
         options={'HIDDEN'},
     )
-    useTimeline = BoolProperty(
+    previewKeysOnly = BoolProperty(
         name="Use timeline",
         description=(
             "Only export frames indicated by timeline preview 'Start' and 'End' frames values.\n" +
@@ -1519,7 +1521,7 @@ class ExportMD5Anim(Operator, ExportHelper, MD5_Common_Prop, MD5_CommonAnim_Prop
             context, self.filepath,
             (bones, meshObjects),
             correctionMatrix,
-            self.useTimeline,
+            self.previewKeysOnly,
             armatures[0].animation_data.action.frame_range,
             self.baseframeTPose)
         self.report({'INFO'}, "Animation Exported")
